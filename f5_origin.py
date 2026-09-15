@@ -1,8 +1,12 @@
+#!/usr/bin/env python3
 import re, httpx
 try: import dns.resolver
 except ImportError: dns = None
 import fingerprints as fp
 SIG_F5 = "bigipserver"; SIG_ASM = "ts01"
+CDN = ("cloudflare","cloudfront","akamai","fastly","sucuri","imperva","incapsula","edgecast","stackpath","bunny","gcore")
+
+def _host(ip): return f"[{ip}]" if ":" in ip else ip
 
 def gather(domain):
     ips = set()
@@ -45,27 +49,28 @@ def reference(domain):
     try:
         r = httpx.get(f"https://{domain}/", verify=False, timeout=15, follow_redirects=True,
                       headers={"User-Agent":"Mozilla/5.0"})
-        return {"len": len(r.content), "title": _title(r.text),
-                "favicon": fp.favicon_hash(f"https://{domain}")}
+        return {"len": len(r.content), "title": _title(r.text), "favicon": fp.favicon_hash(f"https://{domain}")}
     except Exception:
         return {"len":0,"title":"","favicon":None}
 
 def test_ip(ip, domain, ref):
     for sch in ("https","http"):
         try:
-            r = httpx.get(f"{sch}://{ip}/", headers={"Host": domain, "User-Agent":"Mozilla/5.0"},
+            r = httpx.get(f"{sch}://{_host(ip)}/", headers={"Host": domain, "User-Agent":"Mozilla/5.0"},
                           verify=False, timeout=10, follow_redirects=True)
+            srv = r.headers.get("server","-"); via = r.headers.get("via","")
             ck = " ".join(r.headers.get_list("set-cookie")).lower()
             title = _title(r.text)
+            is_cdn = any(m in srv.lower() for m in CDN) or "cloudfront" in via.lower()
             reasons = []
             if SIG_F5 in ck: reasons.append("F5-cookie")
             if SIG_ASM in ck: reasons.append("ASM-cookie")
-            if ref["title"] and title and ref["title"][:30] == title[:30]: reasons.append("title")
-            return {"ip":ip,"scheme":sch,"status":r.status_code,"server":r.headers.get("server","-"),
-                    "reasons":reasons,"origin":bool(reasons)}
+            if ref["title"] and title and ref["title"][:30] == title[:30] and not is_cdn: reasons.append("title")
+            return {"ip":ip,"scheme":sch,"status":r.status_code,"server":srv,
+                    "cdn":is_cdn,"reasons":reasons,"origin":bool(reasons) and not is_cdn}
         except Exception:
             continue
-    return {"ip":ip,"origin":False,"error":"unreachable","reasons":[],"server":"-"}
+    return {"ip":ip,"origin":False,"error":"unreachable","reasons":[],"server":"-","cdn":False}
 
 def find(domain, verbose=True):
     ref = reference(domain)
@@ -76,8 +81,10 @@ def find(domain, verbose=True):
     for ip in sorted(ips):
         res = test_ip(ip, domain, ref)
         if verbose:
-            tag = ("   <<< ORIGIN: " + ",".join(res.get("reasons",[]))) if res.get("origin") else ""
-            print(f"  {ip:16} {res.get('status',res.get('error',''))}  server={res.get('server','-')}{tag}")
+            tag = ""
+            if res.get("cdn"): tag = "   [CDN edge - skip]"
+            elif res.get("origin"): tag = "   <<< ORIGIN: " + ",".join(res.get("reasons",[]))
+            print(f"  {ip:26} {res.get('status',res.get('error',''))}  server={res.get('server','-')}{tag}")
         if res.get("origin"): found.append(ip)
     return found
 

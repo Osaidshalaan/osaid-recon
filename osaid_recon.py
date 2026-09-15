@@ -2,9 +2,15 @@
 """osaid-recon — unified recon console (final)."""
 import sys, asyncio, ipaddress, datetime, re, httpx
 import waf_detect, origin_finder, origin_scan, evade_client, f5_origin
+import assets, diff_engine
+import deep_discovery
 from config import HIGH_VALUE_PORTS, SCAN_CONC
 S = {"domain":None,"url":None,"candidates":[],"waf":None,"open_ports":{},"log":[]}
-def norm(r): r=r.strip().replace("https://","").replace("http://","").strip("/"); return r, f"https://{r}"
+def norm(r):
+    r=r.strip().replace("https://","").replace("http://","").strip("/")
+    return r.split("/")[0], f"https://{r}"
+
+
 def header(t): print("\n"+"="*62+f"\n  {t}\n"+"="*62)
 def ask(p,d=None): v=input(p).strip(); return v if v else d
 def note(m): S["log"].append(f"{datetime.datetime.now().isoformat(timespec='seconds')}  {m}")
@@ -23,7 +29,7 @@ def f5_decode(v):
 ASM_PAYLOADS={"clean":"/","sqli":"/?id=1 UNION SELECT 1,2,3--","xss":"/?q=<script>alert(1)</script>",
 "traversal":"/../../etc/passwd","cmd":"/?cmd=;id","ssti":"/?name={{7*7}}","log4j":"/?x=${jndi:ldap://x/a}"}
 def asm_map(base):
-    with httpx.Client(verify=False,timeout=20,follow_redirects=False,headers={"User-Agent":"Mozilla/5.0"}) as c:
+    with httpx.Client(verify=False,timeout=20,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0"}) as c:
         for n,p in ASM_PAYLOADS.items():
             try:
                 r=c.get(base.rstrip("/")+p); print(f"  {n:11} {r.status_code} len={len(r.content)}")
@@ -50,7 +56,10 @@ def p_origin():
     S["candidates"]=sorted(c); print(f"[+] candidates: {S['candidates'] or 'none'}"); note(f"candidates {S['candidates']}")
 def p_decode():
     header("F5 cookie decode"); v=ask("[?] cookie value: ")
-    if v: ip,po=f5_decode(v); print(f"[+] backend {ip}:{po}"); note(f"decode {v}->{ip}:{po}")
+    if not v: return
+    if not re.fullmatch(r"\d+\.\d+\.\d+", v):
+        print("[!] bad format. example: 687871404.47873.0000"); return
+    ip,po=f5_decode(v); print(f"[+] backend {ip}:{po}"); note(f"decode {v}->{ip}:{po}")
 def p_scan():
     header("Port scan")
     if S["candidates"]:
@@ -94,6 +103,7 @@ MENU="""
  4) Decode cookie 5) Scan            6) Evade
  7) ASM map       8) API/JS dump      9) Report
 10) Change target 0) Exit
+13) Asset inventory   14) HTTP diff   16) Deep discovery
 """
 def main():
     if "--selftest" in sys.argv: selftest(); return
@@ -116,6 +126,14 @@ def main():
             elif c=="10":
                 r=ask("[?] new target: ")
                 if r: S.update({"domain":None,"url":None,"candidates":[],"open_ports":{},"log":[]}); S["domain"],S["url"]=norm(r)
+            elif c=="13":
+                rows=assets.analyze(S["domain"]); assets.print_inventory(S["domain"], rows)
+            elif c=="14":
+                base=diff_engine.baseline(S["url"])
+                for r in diff_engine.probe(base, S["url"], ASM_PAYLOADS):
+                    print(f"  {r['label']:12} {r['status']} sim={r['similarity']:.2%} {r['conclusion']}")
+            elif c=="16":
+                deep_discovery.run(S["url"])
             elif c=="0": break
         except KeyboardInterrupt: continue
         except Exception as e: print(f"[!] {e}")
